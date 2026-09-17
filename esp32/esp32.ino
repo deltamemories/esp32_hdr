@@ -22,6 +22,40 @@ camera_config_t config;
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(SW, SH);
 
+
+#define FRAMES_CNT 3
+#define FRAME_BUF_SIZE (640 * 480 * 2)
+
+// TODO: refactor into class
+uint8_t *frames_pool[FRAMES_CNT];
+size_t frames_lengths[FRAMES_CNT];
+int curr_write_id = 0;
+
+
+void init_frames_buffers() {
+  for (int i = 0; i < FRAMES_CNT; i++) {
+    frames_pool[i] = (uint8_t *)ps_malloc(FRAME_BUF_SIZE);
+    if (!frames_pool[i]) {
+      Serial.println("failed to allocate PSRAM for frame buffer");
+    }
+  }
+}
+
+void capture_frame() {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    return;
+  }
+
+  uint8_t *target_buf = frames_pool[curr_write_id];
+  memcpy(target_buf, fb->buf, fb->len);
+  frames_lengths[curr_write_id] = fb->len;
+
+  esp_camera_fb_return(fb);
+
+  curr_write_id = (curr_write_id + 1) % FRAMES_CNT;
+}
+
 void setup() {
   Serial.begin(115200);
   preferences.begin("config", false);
@@ -38,28 +72,65 @@ void setup() {
     Serial.println("camera init failed");
   }
 
+  init_frames_buffers();
+
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   canvas.setTextSize(2);
   canvas.println("test");
-  
+
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
 }
 
 void loop() {
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
+  capture_frame();
+
+  render_first_frame(640, 480);
+
+  delay(1000);
+}
+
+void render_first_frame(int src_w, int src_h) {
+  uint8_t *yuv_buf = frames_pool[0];
+  if (!yuv_buf) {
     return;
   }
 
-  uint8_t *raw_pixels = fb->buf;
-  size_t len = fb->len;
+  uint16_t *buf = canvas.getBuffer();
 
-  Serial.println(len);
+  for (int y = 0; y < SH; y++) {
+    int src_y = (y * src_h) / SH;
+    for (int x = 0; x < SW; x++) {
+      int src_x = (x * src_w) / SW;
 
-  esp_camera_fb_return(fb);
+      int yuv_idx = (src_y * src_w + src_x) * 2;
+      int pair_base = yuv_idx & ~3;
 
-  delay(100);
+      uint8_t y_val = yuv_buf[pair_base + ((src_x & 1) ? 2 : 0)];
+      uint8_t u_val = yuv_buf[pair_base + 1];
+      uint8_t v_val = yuv_buf[pair_base + 3];
+
+      buf[y * SW + x] = yuv_to_rgb565(y_val, u_val, v_val);
+    }
+  }
+
+  tft.drawRGBBitmap(0, 0, buf, SW, SH);
+}
+
+uint16_t yuv_to_rgb565(uint8_t y, uint8_t u, uint8_t v) {
+  int c = (int)y - 16;
+  int d = (int)u - 128;
+  int e = (int)v - 128;
+
+  int r = (298 * c + 409 * e + 128) >> 8;
+  int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+  int b = (298 * c + 516 * d + 128) >> 8;
+
+  r = r < 0 ? 0 : (r > 255 ? 255 : r);
+  g = g < 0 ? 0 : (g > 255 ? 255 : g);
+  b = b < 0 ? 0 : (b > 255 ? 255 : b);
+
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
 esp_err_t init_camera() {
