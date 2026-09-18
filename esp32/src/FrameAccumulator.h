@@ -1,5 +1,5 @@
-#ifndef ISP_H
-#define ISP_H
+#ifndef ESP32_HDR_FRAMEACCUMULATOR_H
+#define ESP32_HDR_FRAMEACCUMULATOR_H
 
 #include <Arduino.h>
 #include "esp_camera.h"
