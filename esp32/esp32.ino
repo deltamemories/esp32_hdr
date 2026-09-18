@@ -6,7 +6,7 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
-#include "FrameAccumulator.h"
+#include "src/FrameAccumulator.h"
 
 Preferences preferences;
 camera_config_t config;
