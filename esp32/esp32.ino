@@ -6,6 +6,8 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
+#include "FrameAccumulator.h"
+
 Preferences preferences;
 camera_config_t config;
 
@@ -19,42 +21,16 @@ camera_config_t config;
 #define SW 240
 #define SH 320
 
+// camera dimensions
+#define CAM_W 640
+#define CAM_H 480
+
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(SW, SH);
 
 
-#define FRAMES_CNT 3
-#define FRAME_BUF_SIZE (640 * 480 * 2)
+FrameAccumulator frameAcc(3, CAM_W, CAM_H, 2);
 
-// TODO: refactor into class
-uint8_t *frames_pool[FRAMES_CNT];
-size_t frames_lengths[FRAMES_CNT];
-int curr_write_id = 0;
-
-
-void init_frames_buffers() {
-  for (int i = 0; i < FRAMES_CNT; i++) {
-    frames_pool[i] = (uint8_t *)ps_malloc(FRAME_BUF_SIZE);
-    if (!frames_pool[i]) {
-      Serial.println("failed to allocate PSRAM for frame buffer");
-    }
-  }
-}
-
-void capture_frame() {
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    return;
-  }
-
-  uint8_t *target_buf = frames_pool[curr_write_id];
-  memcpy(target_buf, fb->buf, fb->len);
-  frames_lengths[curr_write_id] = fb->len;
-
-  esp_camera_fb_return(fb);
-
-  curr_write_id = (curr_write_id + 1) % FRAMES_CNT;
-}
 
 void setup() {
   Serial.begin(115200);
@@ -65,14 +41,12 @@ void setup() {
   tft.init(240, 320);
   tft.setSPISpeed(80'000'000);
   tft.invertDisplay(false);
-  tft.setRotation(0);
+  tft.setRotation(2);
   // TFT init end
 
   if (init_camera() != ESP_OK) {
     Serial.println("camera init failed");
   }
-
-  init_frames_buffers();
 
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
@@ -83,20 +57,44 @@ void setup() {
 }
 
 void loop() {
-  capture_frame();
+  frameAcc.reset();
 
-  render_first_frame(640, 480);
+  while (!frameAcc.is_full()) {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+      // delay(1);
+      continue;
+    }
 
-  delay(1000);
-}
-
-void render_first_frame(int src_w, int src_h) {
-  uint8_t *yuv_buf = frames_pool[0];
-  if (!yuv_buf) {
-    return;
+    frameAcc.push_frame(fb);
+    esp_camera_fb_return(fb);
+    // delay(1);
   }
 
-  uint16_t *buf = canvas.getBuffer();
+
+  // processing algorithms
+
+
+  // just copy 1st frame to out for test
+  uint8_t** frames = frameAcc.get_frames();
+  uint8_t* out = frameAcc.get_output_frame();
+
+  if (frames && frames[0] && out) {
+    memcpy(out, frames[0], CAM_W * CAM_H * 2);
+  }
+
+
+  uint8_t* result_frame = frameAcc.get_output_frame();
+  Serial.println("render...");
+  render_frame(result_frame, CAM_W, CAM_H);
+
+  // delay(1);
+}
+
+void render_frame(uint8_t* yuv_buf, int src_w, int src_h) {
+  if (!yuv_buf) return;
+
+  uint16_t* buf = canvas.getBuffer();
 
   for (int y = 0; y < SH; y++) {
     int src_y = (y * src_h) / SH;
