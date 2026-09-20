@@ -84,3 +84,7 @@ int FrameAccumulator::get_width() const {
 int FrameAccumulator::get_height() const {
   return _height;
 }
+
+int FrameAccumulator::get_frame_size() const {
+  return _frame_size;
+}

@@ -31,6 +31,7 @@ public:
   uint8_t* get_output_frame();
   int get_width() const;
   int get_height() const;
+  int get_frame_size() const;
 };
 
 #endif
