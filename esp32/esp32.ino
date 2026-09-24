@@ -7,6 +7,13 @@
 #include <SPI.h>
 
 #include "src/FrameAccumulator.h"
+#include "src/isp/IspPipeline.h"
+#include "src/isp/FramePassThrough.h"
+
+extern "C" {
+  uint8_t SCCB_Read(uint8_t slv_addr, uint8_t reg);
+  int SCCB_Write(uint8_t slv_addr, uint8_t reg, uint8_t data);
+}
 
 Preferences preferences;
 camera_config_t config;
@@ -25,11 +32,20 @@ camera_config_t config;
 #define CAM_W 640
 #define CAM_H 480
 
+// camera regs
+#define REG_GAIN 0x00
+#define REG_COM1 0x04
+#define REG_AECHH 0x07
+#define REG_AECH 0x10
+#define REG_COM8 0x13
+#define REG_COM13 0x3D
+#define REG_COM16 0x41
+
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(SW, SH);
 
-
-FrameAccumulator frameAcc(3, CAM_W, CAM_H, 2);
+FrameAccumulator frameAcc(1, CAM_W, CAM_H, 2);
+IspPipeline pipeline;
 
 
 void setup() {
@@ -41,19 +57,31 @@ void setup() {
   tft.init(240, 320);
   tft.setSPISpeed(80'000'000);
   tft.invertDisplay(false);
-  tft.setRotation(2);
-  // TFT init end
-
-  if (init_camera() != ESP_OK) {
-    Serial.println("camera init failed");
-  }
+  tft.setRotation(0);
 
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   canvas.setTextSize(2);
-  canvas.println("test");
 
+  canvas.println("setting up sensor...");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+  if (init_camera() != ESP_OK) {
+    Serial.println("camera init failed");
+    return;
+  }
+
+  sensor_t* s = esp_camera_sensor_get();
+  if (enable_camera_manual_mode(s)) {
+    set_manual_exposure(s, 100);
+    set_manual_gain(s, 0x00);
+  } else {
+    Serial.println("manual control setup failed");
+  }
+
+  pipeline.add_step(new FramePassThrough());
+
+  tft.setRotation(2);
 }
 
 void loop() {
@@ -62,33 +90,64 @@ void loop() {
   while (!frameAcc.is_full()) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) {
-      // delay(1);
       continue;
     }
 
     frameAcc.push_frame(fb);
     esp_camera_fb_return(fb);
-    // delay(1);
   }
 
-
-  // processing algorithms
-
-
-  // just copy 1st frame to out for test
-  uint8_t** frames = frameAcc.get_frames();
-  uint8_t* out = frameAcc.get_output_frame();
-
-  if (frames && frames[0] && out) {
-    memcpy(out, frames[0], CAM_W * CAM_H * 2);
-  }
-
+  pipeline.execute(&frameAcc);
 
   uint8_t* result_frame = frameAcc.get_output_frame();
   Serial.println("render...");
   render_frame(result_frame, CAM_W, CAM_H);
+}
 
-  // delay(1);
+void set_manual_exposure(sensor_t* s, uint16_t exposure_lines) {
+  if (!s) return;
+
+  uint8_t com1 = SCCB_Read(s->slv_addr, REG_COM1);
+  com1 = (com1 & ~0x03) | (exposure_lines & 0x03);
+  SCCB_Write(s->slv_addr, REG_COM1, com1);
+
+  SCCB_Write(s->slv_addr, REG_AECH, (exposure_lines >> 2) & 0xFF);
+
+  uint8_t aechh = SCCB_Read(s->slv_addr, REG_AECHH);
+  aechh = (aechh & ~0x3F) | ((exposure_lines >> 10) & 0x3F);
+  SCCB_Write(s->slv_addr, REG_AECHH, aechh);
+}
+
+void set_manual_gain(sensor_t* s, uint8_t gain_val) {
+  if (!s) return;
+  SCCB_Write(s->slv_addr, REG_GAIN, gain_val);
+}
+
+bool enable_camera_manual_mode(sensor_t* s) {
+  if (!s) return false;
+
+  if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 0);
+  if (s->set_gain_ctrl) s->set_gain_ctrl(s, 0);
+  if (s->set_whitebal) s->set_whitebal(s, 0);
+
+  if (s->set_bpc) s->set_bpc(s, 0);
+  if (s->set_wpc) s->set_wpc(s, 0);
+  if (s->set_lenc) s->set_lenc(s, 0);
+
+  uint8_t com8 = SCCB_Read(s->slv_addr, REG_COM8);
+  com8 &= ~0x47;
+  SCCB_Write(s->slv_addr, REG_COM8, com8);
+
+  uint8_t com16 = SCCB_Read(s->slv_addr, REG_COM16);
+  com16 &= ~0x40;
+  SCCB_Write(s->slv_addr, REG_COM16, com16);
+
+  uint8_t com13 = SCCB_Read(s->slv_addr, REG_COM13);
+  com13 &= ~0x80;
+  SCCB_Write(s->slv_addr, REG_COM13, com13);
+
+  Serial.println("SUCCESS: Absolute static manual mode engaged");
+  return true;
 }
 
 void render_frame(uint8_t* yuv_buf, int src_w, int src_h) {
