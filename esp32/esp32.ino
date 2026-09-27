@@ -55,6 +55,16 @@ char wifiPassword[65] = "";
 AsyncWebServer server(80);
 AsyncWebSocket socket("/ws");
 
+TaskHandle_t networkTaskHandle = NULL;
+
+void networkTask(void* pvParameters) {
+  socket.onEvent(onEvent);
+  server.addHandler(&socket);
+  server.begin();
+
+  vTaskDelete(NULL);
+}
+
 
 void setup() {
   Serial.begin(115200);
@@ -163,13 +173,18 @@ void setup() {
   Serial.print("My ip: ");
   Serial.println(WiFi.localIP());
 
-  socket.onEvent(onEvent);
-  server.addHandler(&socket);
-
-  server.begin();
+  xTaskCreatePinnedToCore(
+    networkTask,
+    "networkTask",
+    4096,
+    NULL,
+    1,
+    &networkTaskHandle,
+    0);
 
   tft.setRotation(2);
 }
+
 
 void loop() {
   frameAcc.reset();
