@@ -1,5 +1,6 @@
 #include <Preferences.h>
 #include "esp_camera.h"
+#include "img_converters.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
@@ -226,6 +227,15 @@ void loop() {
   uint8_t* result_frame = frameAcc.get_output_frame();
   Serial.println("render...");
   render_frame(result_frame, CAM_W, CAM_H);
+
+  if (socket.count() > 0) {
+    uint8_t* jpg_buf = NULL;
+    size_t jpg_len = 0;
+    if (fmt2jpg(result_frame, CAM_W*CAM_H*2, CAM_W, CAM_H, PIXFORMAT_YUV422, 40, &jpg_buf, &jpg_len)) {
+      socket.binaryAll(jpg_buf, jpg_len);
+      free(jpg_buf);
+    }
+  }
 }
 
 
