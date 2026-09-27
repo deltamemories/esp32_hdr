@@ -5,6 +5,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
 
 #include "src/FrameAccumulator.h"
 #include "src/isp/IspPipeline.h"
@@ -47,6 +49,12 @@ GFXcanvas16 canvas(SW, SH);
 FrameAccumulator frameAcc(1, CAM_W, CAM_H, 2);
 IspPipeline pipeline;
 
+char wifiSsid[33] = "";
+char wifiPassword[65] = "";
+
+AsyncWebServer server(80);
+AsyncWebSocket socket("/ws");
+
 
 void setup() {
   Serial.begin(115200);
@@ -81,6 +89,85 @@ void setup() {
 
   pipeline.add_step(new FramePassThrough());
 
+
+
+  memset(wifiSsid, 0, sizeof(wifiSsid));
+  size_t wifiSsidReadLength = preferences.getBytes("wifi-ssid", wifiSsid, sizeof(wifiSsid) - 1);
+  wifiSsid[sizeof(wifiSsid) - 1] = '\0';
+  if (wifiSsidReadLength > 0 && strlen(wifiSsid) > 0) {
+    memset(wifiPassword, 0, sizeof(wifiPassword));
+    size_t wifiPasswordReadLength = preferences.getBytes("wifi-password", wifiPassword, sizeof(wifiPassword) - 1);
+    wifiPassword[sizeof(wifiPassword) - 1] = '\0';
+    preferences.end();
+  } else {
+    canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    canvas.setTextSize(2);
+
+    Serial.println("Enter wifi ssid");
+    canvas.setCursor(0, 0);
+    canvas.println("Enter wifi ssid");
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    while (!Serial.available()) delay(10);
+    String tmp = Serial.readString();
+    tmp.trim();
+    strncpy(wifiSsid, tmp.c_str(), sizeof(wifiSsid) - 1);
+    wifiSsid[sizeof(wifiSsid) - 1] = '\0';
+
+    Serial.println("Enter wifi password");
+    canvas.setCursor(0, 0);
+    canvas.println("Enter wifi password");
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    while (!Serial.available()) delay(10);
+    String tmp2 = Serial.readString();
+    tmp2.trim();
+    strncpy(wifiPassword, tmp2.c_str(), sizeof(wifiPassword) - 1);
+    wifiPassword[sizeof(wifiPassword) - 1] = '\0';
+
+    canvas.fillScreen(ST77XX_BLACK);
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    Serial.print("SSID length: ");
+    Serial.println(strlen(wifiSsid));
+
+    preferences.putBytes("wifi-ssid", wifiSsid, strlen(wifiSsid) + 1);
+    preferences.putBytes("wifi-password", wifiPassword, strlen(wifiPassword) + 1);
+    preferences.end();
+    Serial.println("SSID & password saved in NVM");
+  }
+
+  WiFi.begin(wifiSsid, wifiPassword);
+
+  canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  canvas.setTextSize(2);
+
+  size_t dotsCount = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    canvas.fillScreen(ST77XX_BLACK);
+    canvas.setCursor(0, 0);
+    canvas.print("Connecting");
+    for (int i = 0; i < dotsCount % 4; i++) {
+      canvas.print(".");
+    }
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    Serial.print(".");
+    dotsCount++;
+    delay(500);
+  }
+
+  canvas.fillScreen(ST77XX_BLACK);
+  tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+  Serial.println("\nWiFi connected");
+  Serial.print("My ip: ");
+  Serial.println(WiFi.localIP());
+
+  socket.onEvent(onEvent);
+  server.addHandler(&socket);
+
+  server.begin();
+
   tft.setRotation(2);
 }
 
@@ -103,6 +190,31 @@ void loop() {
   Serial.println("render...");
   render_frame(result_frame, CAM_W, CAM_H);
 }
+
+
+void onEvent(
+  AsyncWebSocket* server,
+  AsyncWebSocketClient* client,
+  AwsEventType type,
+  void* arg,
+  uint8_t* data,
+  size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      client->text("\"Hello from ESP32 server\"");
+      break;
+
+    case WS_EVT_DISCONNECT:
+      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      break;
+
+    case WS_EVT_DATA:
+      // TODO add listener
+      break;
+  }
+}
+
 
 void set_manual_exposure(sensor_t* s, uint16_t exposure_lines) {
   if (!s) return;
