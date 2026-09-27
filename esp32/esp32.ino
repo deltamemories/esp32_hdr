@@ -1,12 +1,12 @@
 #include <Preferences.h>
-
 #include "esp_camera.h"
-
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncJson.h>
+#include <ArduinoJson.h>
 
 #include "src/FrameAccumulator.h"
 #include "src/isp/IspPipeline.h"
@@ -60,6 +60,28 @@ TaskHandle_t networkTaskHandle = NULL;
 void networkTask(void* pvParameters) {
   socket.onEvent(onEvent);
   server.addHandler(&socket);
+
+  AsyncCallbackJsonWebHandler* settingsHandler = new AsyncCallbackJsonWebHandler("/api/settings", [](AsyncWebServerRequest* request, JsonVariant& json) {
+    JsonObject jsonObj = json.as<JsonObject>();
+
+    if (jsonObj.containsKey("exposure") && jsonObj.containsKey("iso")) {
+      uint16_t exp_val = jsonObj["exposure"].as<uint16_t>();
+      uint8_t iso_val = jsonObj["iso"].as<uint8_t>();
+
+      sensor_t* s = esp_camera_sensor_get();
+      if (s) {
+        set_manual_exposure(s, exp_val);
+        set_manual_gain(s, iso_val);
+      }
+
+      request->send(200, "application/json", "{\"status\":\"success\"}");
+    } else {
+      request->send(400, "application/json", "{\"status\":\"error\"}");
+    }
+  });
+
+  server.addHandler(settingsHandler);
+
   server.begin();
 
   vTaskDelete(NULL);
