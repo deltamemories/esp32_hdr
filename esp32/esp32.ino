@@ -1,10 +1,13 @@
 #include <Preferences.h>
-
 #include "esp_camera.h"
-
+#include "img_converters.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncJson.h>
+#include <ArduinoJson.h>
 
 #include "src/FrameAccumulator.h"
 #include "src/isp/IspPipeline.h"
@@ -47,6 +50,44 @@ GFXcanvas16 canvas(SW, SH);
 FrameAccumulator frameAcc(1, CAM_W, CAM_H, 2);
 IspPipeline pipeline;
 
+char wifiSsid[33] = "";
+char wifiPassword[65] = "";
+
+AsyncWebServer server(80);
+AsyncWebSocket socket("/ws");
+
+TaskHandle_t networkTaskHandle = NULL;
+
+void networkTask(void* pvParameters) {
+  socket.onEvent(onEvent);
+  server.addHandler(&socket);
+
+  AsyncCallbackJsonWebHandler* settingsHandler = new AsyncCallbackJsonWebHandler("/api/settings", [](AsyncWebServerRequest* request, JsonVariant& json) {
+    JsonObject jsonObj = json.as<JsonObject>();
+
+    if (jsonObj.containsKey("exposure") && jsonObj.containsKey("iso")) {
+      uint16_t exp_val = jsonObj["exposure"].as<uint16_t>();
+      uint8_t iso_val = jsonObj["iso"].as<uint8_t>();
+
+      sensor_t* s = esp_camera_sensor_get();
+      if (s) {
+        set_manual_exposure(s, exp_val);
+        set_manual_gain(s, iso_val);
+      }
+
+      request->send(200, "application/json", "{\"status\":\"success\"}");
+    } else {
+      request->send(400, "application/json", "{\"status\":\"error\"}");
+    }
+  });
+
+  server.addHandler(settingsHandler);
+
+  server.begin();
+
+  vTaskDelete(NULL);
+}
+
 
 void setup() {
   Serial.begin(115200);
@@ -81,8 +122,92 @@ void setup() {
 
   pipeline.add_step(new FramePassThrough());
 
+
+
+  memset(wifiSsid, 0, sizeof(wifiSsid));
+  size_t wifiSsidReadLength = preferences.getBytes("wifi-ssid", wifiSsid, sizeof(wifiSsid) - 1);
+  wifiSsid[sizeof(wifiSsid) - 1] = '\0';
+  if (wifiSsidReadLength > 0 && strlen(wifiSsid) > 0) {
+    memset(wifiPassword, 0, sizeof(wifiPassword));
+    size_t wifiPasswordReadLength = preferences.getBytes("wifi-password", wifiPassword, sizeof(wifiPassword) - 1);
+    wifiPassword[sizeof(wifiPassword) - 1] = '\0';
+    preferences.end();
+  } else {
+    canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    canvas.setTextSize(2);
+
+    Serial.println("Enter wifi ssid");
+    canvas.setCursor(0, 0);
+    canvas.println("Enter wifi ssid");
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    while (!Serial.available()) delay(10);
+    String tmp = Serial.readString();
+    tmp.trim();
+    strncpy(wifiSsid, tmp.c_str(), sizeof(wifiSsid) - 1);
+    wifiSsid[sizeof(wifiSsid) - 1] = '\0';
+
+    Serial.println("Enter wifi password");
+    canvas.setCursor(0, 0);
+    canvas.println("Enter wifi password");
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    while (!Serial.available()) delay(10);
+    String tmp2 = Serial.readString();
+    tmp2.trim();
+    strncpy(wifiPassword, tmp2.c_str(), sizeof(wifiPassword) - 1);
+    wifiPassword[sizeof(wifiPassword) - 1] = '\0';
+
+    canvas.fillScreen(ST77XX_BLACK);
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    Serial.print("SSID length: ");
+    Serial.println(strlen(wifiSsid));
+
+    preferences.putBytes("wifi-ssid", wifiSsid, strlen(wifiSsid) + 1);
+    preferences.putBytes("wifi-password", wifiPassword, strlen(wifiPassword) + 1);
+    preferences.end();
+    Serial.println("SSID & password saved in NVM");
+  }
+
+  WiFi.begin(wifiSsid, wifiPassword);
+
+  canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  canvas.setTextSize(2);
+
+  size_t dotsCount = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    canvas.fillScreen(ST77XX_BLACK);
+    canvas.setCursor(0, 0);
+    canvas.print("Connecting");
+    for (int i = 0; i < dotsCount % 4; i++) {
+      canvas.print(".");
+    }
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+
+    Serial.print(".");
+    dotsCount++;
+    delay(500);
+  }
+
+  canvas.fillScreen(ST77XX_BLACK);
+  tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SW, SH);
+  Serial.println("\nWiFi connected");
+  Serial.print("My ip: ");
+  Serial.println(WiFi.localIP());
+
+  xTaskCreatePinnedToCore(
+    networkTask,
+    "networkTask",
+    4096,
+    NULL,
+    1,
+    &networkTaskHandle,
+    0);
+
   tft.setRotation(2);
 }
+
 
 void loop() {
   frameAcc.reset();
@@ -102,7 +227,41 @@ void loop() {
   uint8_t* result_frame = frameAcc.get_output_frame();
   Serial.println("render...");
   render_frame(result_frame, CAM_W, CAM_H);
+
+  if (socket.count() > 0) {
+    uint8_t* jpg_buf = NULL;
+    size_t jpg_len = 0;
+    if (fmt2jpg(result_frame, CAM_W*CAM_H*2, CAM_W, CAM_H, PIXFORMAT_YUV422, 40, &jpg_buf, &jpg_len)) {
+      socket.binaryAll(jpg_buf, jpg_len);
+      free(jpg_buf);
+    }
+  }
 }
+
+
+void onEvent(
+  AsyncWebSocket* server,
+  AsyncWebSocketClient* client,
+  AwsEventType type,
+  void* arg,
+  uint8_t* data,
+  size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      client->text("\"Hello from ESP32 server\"");
+      break;
+
+    case WS_EVT_DISCONNECT:
+      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      break;
+
+    case WS_EVT_DATA:
+      // TODO add listener
+      break;
+  }
+}
+
 
 void set_manual_exposure(sensor_t* s, uint16_t exposure_lines) {
   if (!s) return;
